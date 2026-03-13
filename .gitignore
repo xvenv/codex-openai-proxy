@@ -1,0 +1,45 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Environment
+.env
+.env.local
+.env.*.local
+.venv/
+.venv-*/
+__pycache__/
+*.pyc
+
+# Local agent / editor state
+.agent/
+.claude/
+.kilocode/
+.rust-skills/
+.windsurf/
+.gitmodules
+skills-lock.json
+
+# Auth files (sensitive)
+auth.json
+*.pem
+*.key
+
+# Temporary files
+/tmp/
+*.tmp
+*.temp

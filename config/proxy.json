@@ -1,0 +1,62 @@
+{
+  "default_client_model": "auto",
+  "models": [
+    {
+      "id": "auto",
+      "owned_by": "proxy"
+    },
+    {
+      "id": "balanced",
+      "owned_by": "proxy"
+    },
+    {
+      "id": "small",
+      "owned_by": "proxy",
+      "backend_target": "gpt-5.1-codex-mini"
+    },
+    {
+      "id": "medium",
+      "owned_by": "proxy",
+      "backend_target": "gpt-5.3-codex"
+    },
+    {
+      "id": "large",
+      "owned_by": "proxy",
+      "backend_target": "gpt-5.4"
+    },
+    {
+      "id": "gpt-5.1-codex-mini",
+      "owned_by": "openai"
+    },
+    {
+      "id": "gpt-5.3-codex",
+      "owned_by": "openai"
+    },
+    {
+      "id": "gpt-5.4",
+      "owned_by": "openai"
+    }
+  ],
+  "execution": {
+    "prefer_real_backend": true,
+    "fallback_to_stub": false,
+    "enable_non_streaming_escalation": true,
+    "escalation_min_content_chars": 160
+  },
+  "anthropic_mapping": {
+    "claude-code-fast": "small",
+    "claude-code-default": "medium",
+    "claude-code-max": "large",
+    "claude-haiku": "small",
+    "claude-sonnet": "medium",
+    "claude-opus": "large"
+  },
+  "routing": {
+    "small_max_messages": 4,
+    "small_max_chars": 2000,
+    "large_min_chars": 4000,
+    "multi_file_threshold": 2,
+    "max_code_blocks_for_small": 2,
+    "debug_medium_chars": 1200
+  }
+}
