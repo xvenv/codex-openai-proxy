@@ -468,7 +468,11 @@ impl ProxyServer {
         execution: &ExecutionConfig,
         thinking_level: Option<&ThinkingLevel>,
     ) -> ProxyResult<ChatCompletionsResponse> {
-        debug!("event=backend.request stream={:?}", chat_req.stream);
+        debug!(
+            "event=backend.request model={} stream={:?}",
+            chat_req.model,
+            chat_req.stream
+        );
 
         if execution.prefer_real_backend {
             match self
@@ -574,6 +578,12 @@ impl ProxyServer {
         execution: &ExecutionConfig,
         thinking_level: Option<&ThinkingLevel>,
     ) -> ProxyResult<StreamingResponse> {
+        debug!(
+            "event=backend.streaming_request model={} stream={:?}",
+            chat_req.model,
+            chat_req.stream
+        );
+
         let include_usage = chat_req
             .stream_options
             .as_ref()
@@ -717,6 +727,12 @@ impl ProxyServer {
         let mut retried_without_max_output_tokens = false;
 
         loop {
+            debug!(
+                "event=backend.call model={} max_output_tokens={:?}",
+                responses_req.model,
+                responses_req.max_output_tokens
+            );
+
             let response = self
                 .build_backend_request(&responses_req)
                 .json(&responses_req)
