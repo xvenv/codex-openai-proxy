@@ -1,4 +1,6 @@
 {
+  "port": 8080,
+  "auth_path": "~/.codex/auth.json",
   "default_client_model": "auto",
   "models": [
     {

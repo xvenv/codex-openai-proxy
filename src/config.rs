@@ -9,15 +9,15 @@ use crate::models::{ModelRegistry, ModelRegistryEntry};
 #[command(author, version, about, long_about = None)]
 pub struct Args {
     /// Port to listen on
-    #[arg(short, long, default_value = "8080")]
-    pub port: u16,
+    #[arg(short, long)]
+    pub port: Option<u16>,
 
     /// Path to Codex auth.json file
-    #[arg(long, default_value = "~/.codex/auth.json")]
-    pub auth_path: String,
+    #[arg(long)]
+    pub auth_path: Option<String>,
 
     /// Path to proxy config file
-    #[arg(long, default_value = "config/proxy.json")]
+    #[arg(long, default_value = "~/.codex-proxy/config.json")]
     pub config_path: String,
 }
 
@@ -35,10 +35,20 @@ impl AppConfig {
     pub fn from_args(args: Args) -> Result<Self> {
         let config_path = expand_home_path(&args.config_path);
         let file_config = load_file_config(&config_path)?;
+        let defaults = FileConfig::default();
+
+        let port = args
+            .port
+            .or(file_config.port)
+            .unwrap_or(defaults.port.unwrap_or(8080));
+        let auth_path = args
+            .auth_path
+            .or(file_config.auth_path)
+            .unwrap_or_else(|| defaults.default_auth_path());
 
         Ok(Self {
-            port: args.port,
-            auth_path: expand_home_path(&args.auth_path),
+            port,
+            auth_path: expand_home_path(&auth_path),
             model_registry: ModelRegistry::from_config(
                 file_config.default_client_model,
                 file_config.models,
@@ -94,14 +104,86 @@ impl Default for ExecutionConfig {
     }
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(default)]
 struct FileConfig {
+    port: Option<u16>,
+    auth_path: Option<String>,
     default_client_model: Option<String>,
     models: Vec<ModelRegistryEntry>,
     routing: RoutingPolicyConfig,
     execution: ExecutionConfig,
     anthropic_mapping: HashMap<String, String>,
+}
+
+impl FileConfig {
+    fn default_auth_path(&self) -> String {
+        self.auth_path
+            .clone()
+            .unwrap_or_else(|| "~/.codex/auth.json".to_string())
+    }
+}
+
+impl Default for FileConfig {
+    fn default() -> Self {
+        Self {
+            port: Some(8080),
+            auth_path: Some("~/.codex/auth.json".to_string()),
+            default_client_model: Some("auto".to_string()),
+            models: vec![
+                ModelRegistryEntry {
+                    id: "auto".to_string(),
+                    owned_by: "proxy".to_string(),
+                    backend_target: None,
+                },
+                ModelRegistryEntry {
+                    id: "balanced".to_string(),
+                    owned_by: "proxy".to_string(),
+                    backend_target: None,
+                },
+                ModelRegistryEntry {
+                    id: "small".to_string(),
+                    owned_by: "proxy".to_string(),
+                    backend_target: Some("gpt-5.1-codex-mini".to_string()),
+                },
+                ModelRegistryEntry {
+                    id: "medium".to_string(),
+                    owned_by: "proxy".to_string(),
+                    backend_target: Some("gpt-5.3-codex".to_string()),
+                },
+                ModelRegistryEntry {
+                    id: "large".to_string(),
+                    owned_by: "proxy".to_string(),
+                    backend_target: Some("gpt-5.4".to_string()),
+                },
+                ModelRegistryEntry {
+                    id: "gpt-5.1-codex-mini".to_string(),
+                    owned_by: "openai".to_string(),
+                    backend_target: None,
+                },
+                ModelRegistryEntry {
+                    id: "gpt-5.3-codex".to_string(),
+                    owned_by: "openai".to_string(),
+                    backend_target: None,
+                },
+                ModelRegistryEntry {
+                    id: "gpt-5.4".to_string(),
+                    owned_by: "openai".to_string(),
+                    backend_target: None,
+                },
+            ],
+            routing: RoutingPolicyConfig::default(),
+            execution: ExecutionConfig::default(),
+            anthropic_mapping: HashMap::from([
+                ("claude-code-fast".to_string(), "small".to_string()),
+                ("claude-code-default".to_string(), "medium".to_string()),
+                ("claude-code-max".to_string(), "large".to_string()),
+                ("claude-haiku".to_string(), "small".to_string()),
+                ("claude-sonnet".to_string(), "medium".to_string()),
+                ("claude-opus".to_string(), "large".to_string()),
+            ]),
+        }
+    }
 }
 
 fn expand_home_path(path: &str) -> String {
@@ -129,15 +211,38 @@ fn load_file_config(path: &str) -> Result<FileConfig> {
 mod tests {
     use std::{fs, path::PathBuf};
 
-    use super::{load_file_config, RoutingPolicyConfig};
+    use clap::Parser;
+
+    use super::{load_file_config, AppConfig, Args, RoutingPolicyConfig};
 
     #[test]
     fn missing_config_uses_defaults() {
         let path = unique_test_path("missing");
         let config = load_file_config(path.to_str().unwrap()).expect("config should load");
 
-        assert!(config.models.is_empty());
+        assert_eq!(config.port, Some(8080));
+        assert_eq!(config.auth_path.as_deref(), Some("~/.codex/auth.json"));
+        assert!(!config.models.is_empty());
         assert_eq!(config.routing.small_max_messages, 4);
+    }
+
+    #[test]
+    fn parses_port_and_auth_path_from_file() {
+        let path = unique_test_path("runtime");
+        fs::write(
+            &path,
+            r#"{
+              "port": 9090,
+              "auth_path": "~/custom-auth.json"
+            }"#,
+        )
+        .expect("config file should be written");
+
+        let config = load_file_config(path.to_str().unwrap()).expect("config should parse");
+        assert_eq!(config.port, Some(9090));
+        assert_eq!(config.auth_path.as_deref(), Some("~/custom-auth.json"));
+
+        fs::remove_file(path).ok();
     }
 
     #[test]
@@ -203,6 +308,35 @@ mod tests {
         let config = RoutingPolicyConfig::default();
         assert_eq!(config.small_max_chars, 2_000);
         assert_eq!(config.debug_medium_chars, 1_200);
+    }
+
+    #[test]
+    fn cli_overrides_file_runtime_values() {
+        let path = unique_test_path("override");
+        fs::write(
+            &path,
+            r#"{
+              "port": 9090,
+              "auth_path": "~/from-file.json"
+            }"#,
+        )
+        .expect("config file should be written");
+
+        let args = Args::parse_from([
+            "codex-openai-proxy",
+            "--config-path",
+            path.to_str().expect("path should be utf8"),
+            "--port",
+            "9191",
+            "--auth-path",
+            "~/from-cli.json",
+        ]);
+
+        let config = AppConfig::from_args(args).expect("app config should build");
+        assert_eq!(config.port, 9191);
+        assert!(config.auth_path.ends_with("/from-cli.json"));
+
+        fs::remove_file(path).ok();
     }
 
     fn unique_test_path(label: &str) -> PathBuf {

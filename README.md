@@ -21,13 +21,12 @@ Verified today:
 - official OpenAI Python SDK compatibility
 - Claude Code compatibility against the Anthropic-compatible `/v1/messages` path
 
-The latest implementation status is tracked in [docs/status/2026-03-13-project-summary-and-remaining-tasks.md](docs/status/2026-03-13-project-summary-and-remaining-tasks.md).
-
 ## What It Does
 
 - accepts OpenAI Chat Completions requests
 - accepts Anthropic Messages requests
 - uses Codex auth from `~/.codex/auth.json`
+- reads runtime config from `~/.codex-proxy/config.json` by default
 - supports virtual aliases `auto`, `balanced`, `small`, `medium`, and `large`
 - maps routing decisions onto Codex-supported backend models
 - supports reasoning levels `low`, `medium`, `high`, and `extra_high`
@@ -97,23 +96,64 @@ Anthropic `thinking` request handling:
 
 The proxy keeps Anthropic-style labels externally, but maps `extra_high` to the Codex backend effort value it expects.
 
-## Auth
-
-The proxy reads Codex authentication from `~/.codex/auth.json` by default.
-
-It accepts both top-level and nested token shapes. The important values are:
-
-- access token
-- account id
-- optional API key fallback
-
 ## Quick Start
+
+Create your user config at `~/.codex-proxy/config.json`.
+
+Example:
+
+```json
+{
+  "port": 8080,
+  "auth_path": "~/.codex/auth.json",
+  "default_client_model": "auto",
+  "models": [
+    { "id": "auto", "owned_by": "proxy" },
+    { "id": "balanced", "owned_by": "proxy" },
+    { "id": "small", "owned_by": "proxy", "backend_target": "gpt-5.1-codex-mini" },
+    { "id": "medium", "owned_by": "proxy", "backend_target": "gpt-5.3-codex" },
+    { "id": "large", "owned_by": "proxy", "backend_target": "gpt-5.4" }
+  ],
+  "execution": {
+    "prefer_real_backend": true,
+    "fallback_to_stub": false,
+    "enable_non_streaming_escalation": true,
+    "escalation_min_content_chars": 160
+  },
+  "anthropic_mapping": {
+    "claude-code-fast": "small",
+    "claude-code-default": "medium",
+    "claude-code-max": "large",
+    "claude-haiku": "small",
+    "claude-sonnet": "medium",
+    "claude-opus": "large"
+  },
+  "routing": {
+    "small_max_messages": 4,
+    "small_max_chars": 2000,
+    "large_min_chars": 4000,
+    "multi_file_threshold": 2,
+    "max_code_blocks_for_small": 2,
+    "debug_medium_chars": 1200
+  }
+}
+```
+
+There is also a repo example at [config/example.config.json](/home/nanad/project/codex-openai-proxy/config/example.config.json).
 
 Build and run:
 
 ```bash
 cargo build --release
-./target/release/codex-openai-proxy --port 8080 --auth-path ~/.codex/auth.json
+./target/release/codex-openai-proxy
+```
+
+Optional CLI overrides still exist:
+
+```bash
+./target/release/codex-openai-proxy --port 9090
+./target/release/codex-openai-proxy --auth-path ~/.codex/other-auth.json
+./target/release/codex-openai-proxy --config-path ~/.codex-proxy/config.json
 ```
 
 Health check:
@@ -222,13 +262,13 @@ The curl smoke also verifies:
 Run with logs:
 
 ```bash
-RUST_LOG=info cargo run -- --port 8080
+RUST_LOG=info cargo run
 ```
 
 More verbose:
 
 ```bash
-RUST_LOG=debug cargo run -- --port 8080
+RUST_LOG=debug cargo run
 ```
 
 Useful response headers:
@@ -259,7 +299,7 @@ Common commands:
 ```bash
 cargo fmt
 cargo test
-RUST_LOG=debug cargo run -- --port 8080
+RUST_LOG=debug cargo run
 ```
 
 ## Optional Follow-Up
@@ -272,4 +312,4 @@ Possible follow-up work:
 - expand compatibility only if a concrete client requires additional fields
 - refine observability further if you want shadow-mode or richer analytics
 
-See [docs/status/2026-03-13-project-summary-and-remaining-tasks.md](docs/status/2026-03-13-project-summary-and-remaining-tasks.md) for the latest status snapshot.
+The runtime config defaults are now user-level so local usage stays simple.
