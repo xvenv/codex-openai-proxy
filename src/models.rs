@@ -101,7 +101,7 @@ impl ModelDefinition {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ModelRegistryEntry {
     pub id: String,
     #[serde(default = "default_owned_by")]

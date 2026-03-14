@@ -1,9 +1,12 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::models::{ModelRegistry, ModelRegistryEntry};
+
+const DEFAULT_CONFIG_PATH: &str = "~/.config/codex-proxy/config.json";
+const LEGACY_CONFIG_PATH: &str = "~/.codex-proxy/config.json";
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -17,7 +20,7 @@ pub struct Args {
     pub auth_path: Option<String>,
 
     /// Path to proxy config file
-    #[arg(long, default_value = "~/.codex-proxy/config.json")]
+    #[arg(long, default_value = DEFAULT_CONFIG_PATH)]
     pub config_path: String,
 }
 
@@ -60,7 +63,7 @@ impl AppConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct RoutingPolicyConfig {
     pub small_max_messages: usize,
@@ -84,7 +87,7 @@ impl Default for RoutingPolicyConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ExecutionConfig {
     pub prefer_real_backend: bool,
@@ -104,7 +107,7 @@ impl Default for ExecutionConfig {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(default)]
 struct FileConfig {
     port: Option<u16>,
@@ -198,13 +201,47 @@ fn expand_home_path(path: &str) -> String {
 
 fn load_file_config(path: &str) -> Result<FileConfig> {
     let config_path = std::path::Path::new(path);
-    if !config_path.exists() {
-        return Ok(FileConfig::default());
-    }
+    ensure_file_config(config_path)?;
 
     let config_text =
         std::fs::read_to_string(config_path).with_context(|| format!("Failed to read {path}"))?;
     serde_json::from_str(&config_text).with_context(|| format!("Failed to parse {path}"))
+}
+
+fn ensure_file_config(path: &std::path::Path) -> Result<()> {
+    if !path.exists() {
+        if path == std::path::Path::new(&expand_home_path(DEFAULT_CONFIG_PATH)) {
+            let legacy_path_string = expand_home_path(LEGACY_CONFIG_PATH);
+            let legacy_path = std::path::Path::new(&legacy_path_string);
+            if legacy_path.exists() {
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent).with_context(|| {
+                        format!("Failed to create config directory {}", parent.display())
+                    })?;
+                }
+                std::fs::copy(legacy_path, path).with_context(|| {
+                    format!(
+                        "Failed to migrate legacy config from {} to {}",
+                        legacy_path.display(),
+                        path.display()
+                    )
+                })?;
+                return Ok(());
+            }
+        }
+
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("Failed to create config directory {}", parent.display())
+            })?;
+        }
+        let default_config =
+            serde_json::to_string_pretty(&FileConfig::default()).context("Failed to serialize default config")?;
+        std::fs::write(path, format!("{default_config}\n"))
+            .with_context(|| format!("Failed to write default config {}", path.display()))?;
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -224,6 +261,8 @@ mod tests {
         assert_eq!(config.auth_path.as_deref(), Some("~/.codex/auth.json"));
         assert!(!config.models.is_empty());
         assert_eq!(config.routing.small_max_messages, 4);
+        assert!(path.exists());
+        fs::remove_file(path).ok();
     }
 
     #[test]
@@ -335,6 +374,18 @@ mod tests {
         let config = AppConfig::from_args(args).expect("app config should build");
         assert_eq!(config.port, 9191);
         assert!(config.auth_path.ends_with("/from-cli.json"));
+
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn creates_default_config_file_when_missing() {
+        let path = unique_test_path("autocreate");
+        load_file_config(path.to_str().unwrap()).expect("config should load");
+
+        let written = fs::read_to_string(&path).expect("config file should exist");
+        assert!(written.contains("\"port\": 8080"));
+        assert!(written.contains("\"auth_path\": \"~/.codex/auth.json\""));
 
         fs::remove_file(path).ok();
     }

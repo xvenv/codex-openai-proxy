@@ -26,7 +26,7 @@ Verified today:
 - accepts OpenAI Chat Completions requests
 - accepts Anthropic Messages requests
 - uses Codex auth from `~/.codex/auth.json`
-- reads runtime config from `~/.codex-proxy/config.json` by default
+- reads runtime config from `~/.config/codex-proxy/config.json` by default
 - supports virtual aliases `auto`, `balanced`, `small`, `medium`, and `large`
 - maps routing decisions onto Codex-supported backend models
 - supports reasoning levels `low`, `medium`, `high`, and `extra_high`
@@ -98,7 +98,8 @@ The proxy keeps Anthropic-style labels externally, but maps `extra_high` to the 
 
 ## Quick Start
 
-Create your user config at `~/.codex-proxy/config.json`.
+The proxy will create a default config automatically at `~/.config/codex-proxy/config.json`
+on first run. You can also create or edit it manually.
 
 Example:
 
@@ -153,7 +154,7 @@ Optional CLI overrides still exist:
 ```bash
 ./target/release/codex-openai-proxy --port 9090
 ./target/release/codex-openai-proxy --auth-path ~/.codex/other-auth.json
-./target/release/codex-openai-proxy --config-path ~/.codex-proxy/config.json
+./target/release/codex-openai-proxy --config-path ~/.config/codex-proxy/config.json
 ```
 
 Health check:
