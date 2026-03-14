@@ -149,6 +149,12 @@ cargo build --release
 ./target/release/codex-openai-proxy
 ```
 
+Install to `~/.local/bin` and bootstrap user config:
+
+```bash
+./install.sh
+```
+
 Optional CLI overrides still exist:
 
 ```bash
