@@ -372,6 +372,7 @@ struct AnthropicMessagesRequest {
     #[serde(default)]
     system: Option<serde_json::Value>,
     #[serde(default)]
+    #[allow(dead_code)]
     temperature: Option<f32>,
     #[serde(default)]
     stream: Option<bool>,
@@ -869,7 +870,7 @@ fn anthropic_to_chat_request(
     Ok(ChatCompletionsRequest {
         model: resolve_anthropic_model(&request.model, anthropic_mapping),
         messages,
-        temperature: request.temperature,
+        temperature: None,
         max_tokens: Some(request.max_tokens),
         stream: Some(false),
         stream_options: None,
@@ -1238,6 +1239,30 @@ fn thinking_level_rank(level: &routing::decision::ThinkingLevel) -> u8 {
         routing::decision::ThinkingLevel::Medium => 1,
         routing::decision::ThinkingLevel::High => 2,
         routing::decision::ThinkingLevel::ExtraHigh => 3,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{anthropic_to_chat_request, AnthropicMessagesRequest};
+    use std::collections::HashMap;
+
+    #[test]
+    fn anthropic_temperature_is_not_forwarded_to_backend_request() {
+        let request: AnthropicMessagesRequest = serde_json::from_str(
+            r#"{
+                "model": "claude-3-7-sonnet-20250219",
+                "messages": [{"role": "user", "content": "hello"}],
+                "max_tokens": 128,
+                "temperature": 0.7
+            }"#,
+        )
+        .expect("Anthropic request should deserialize");
+
+        let chat_request = anthropic_to_chat_request(&request, &HashMap::new())
+            .expect("Anthropic request should convert");
+
+        assert_eq!(chat_request.temperature, None);
     }
 }
 
