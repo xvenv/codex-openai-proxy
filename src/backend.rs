@@ -320,11 +320,15 @@ impl ProxyServer {
         let auth_data: AuthData =
             serde_json::from_str(&auth_content).context("Failed to parse auth.json")?;
 
+        // Use the same User-Agent format as the Codex Desktop app so that the
+        // OpenAI backend applies the desktop quota tier:
+        //   buildDesktopUserAgent() → `Codex Desktop/<ver> (<platform>; <arch>)`
+        // Version matches CFBundleShortVersionString from the official Codex DMG Info.plist.
+        // Hardcoding OS and arch to fake being an Apple Silicon (M3) Mac to match the premium tier.
+        let desktop_ua = "Codex Desktop/26.224.1209 (darwin; arm64)";
+
         let client = Client::builder()
-            .user_agent(
-                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
-                 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            )
+            .user_agent(desktop_ua)
             .build()
             .context("Failed to create HTTP client")?;
 
@@ -784,7 +788,9 @@ impl ProxyServer {
             .header("Pragma", "no-cache")
             .header("DNT", "1")
             .header("OpenAI-Beta", "responses=experimental")
-            .header("originator", "codex_cli_rs");
+            // "Codex Desktop" is the originator value the desktop app sends;
+            // OpenAI's backend uses this to grant the desktop quota tier (2x CLI).
+            .header("originator", "Codex Desktop");
 
         if let Some(tokens) = &self.auth_data.tokens {
             request_builder =

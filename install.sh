@@ -18,7 +18,9 @@ echo "==> building release binary"
 cargo build --release --manifest-path "${REPO_DIR}/Cargo.toml"
 
 echo "==> installing binary to ${INSTALL_PATH}"
-install -Dm755 "${REPO_DIR}/target/release/codex-openai-proxy" "${INSTALL_PATH}"
+mkdir -p "${BIN_DIR}"
+cp "${REPO_DIR}/target/release/codex-openai-proxy" "${INSTALL_PATH}"
+chmod 755 "${INSTALL_PATH}"
 
 mkdir -p "${CONFIG_DIR}"
 
