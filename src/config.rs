@@ -123,7 +123,7 @@ impl FileConfig {
     fn default_auth_path(&self) -> String {
         self.auth_path
             .clone()
-            .unwrap_or_else(|| "~/.codex/auth.json".to_string())
+            .unwrap_or_else(|| "~/.config/codex-proxy/auth.json".to_string())
     }
 }
 
@@ -131,7 +131,7 @@ impl Default for FileConfig {
     fn default() -> Self {
         Self {
             port: Some(8080),
-            auth_path: Some("~/.codex/auth.json".to_string()),
+            auth_path: Some("~/.config/codex-proxy/auth.json".to_string()),
             default_client_model: Some("auto".to_string()),
             models: vec![
                 ModelRegistryEntry {
@@ -235,8 +235,8 @@ fn ensure_file_config(path: &std::path::Path) -> Result<()> {
                 format!("Failed to create config directory {}", parent.display())
             })?;
         }
-        let default_config =
-            serde_json::to_string_pretty(&FileConfig::default()).context("Failed to serialize default config")?;
+        let default_config = serde_json::to_string_pretty(&FileConfig::default())
+            .context("Failed to serialize default config")?;
         std::fs::write(path, format!("{default_config}\n"))
             .with_context(|| format!("Failed to write default config {}", path.display()))?;
     }
@@ -250,7 +250,7 @@ mod tests {
 
     use clap::Parser;
 
-    use super::{load_file_config, AppConfig, Args, RoutingPolicyConfig};
+    use super::{AppConfig, Args, RoutingPolicyConfig, load_file_config};
 
     #[test]
     fn missing_config_uses_defaults() {
@@ -258,7 +258,7 @@ mod tests {
         let config = load_file_config(path.to_str().unwrap()).expect("config should load");
 
         assert_eq!(config.port, Some(8080));
-        assert_eq!(config.auth_path.as_deref(), Some("~/.codex/auth.json"));
+        assert_eq!(config.auth_path.as_deref(), Some("~/.config/codex-proxy/auth.json"));
         assert!(!config.models.is_empty());
         assert_eq!(config.routing.small_max_messages, 4);
         assert!(path.exists());
@@ -385,7 +385,7 @@ mod tests {
 
         let written = fs::read_to_string(&path).expect("config file should exist");
         assert!(written.contains("\"port\": 8080"));
-        assert!(written.contains("\"auth_path\": \"~/.codex/auth.json\""));
+        assert!(written.contains("\"auth_path\": \"~/.config/codex-proxy/auth.json\""));
 
         fs::remove_file(path).ok();
     }

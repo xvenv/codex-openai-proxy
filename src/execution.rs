@@ -3,7 +3,7 @@ use crate::{
     config::ExecutionConfig,
     models::ModelRegistry,
     routing::{
-        decision::ThinkingLevel, EscalationReason, OverrideSource, RoutingDecision, RoutingReason,
+        EscalationReason, OverrideSource, RoutingDecision, RoutingReason, decision::ThinkingLevel,
     },
 };
 
@@ -165,8 +165,8 @@ mod tests {
         },
         config::ExecutionConfig,
         routing::{
-            decision::{TaskKind, ThinkingLevel},
             OverrideSource, RoutingDecision, RoutingReason,
+            decision::{TaskKind, ThinkingLevel},
         },
     };
 

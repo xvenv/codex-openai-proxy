@@ -1,16 +1,21 @@
 use anyhow::{Context, Result};
-use log::{debug, warn};
+use log::{debug, info, warn};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
-use std::{collections::HashMap, convert::Infallible, pin::Pin};
+use serde_json::{Value, json};
+use std::{
+    collections::HashMap,
+    convert::Infallible,
+    pin::Pin,
+    sync::{Arc, RwLock, atomic::{AtomicUsize, Ordering}},
+};
 use thiserror::Error;
 use uuid::Uuid;
 
 use crate::config::ExecutionConfig;
 use crate::routing::decision::ThinkingLevel;
 use bytes::Bytes;
-use futures_util::{stream, Stream, StreamExt};
+use futures_util::{Stream, StreamExt, stream};
 
 #[derive(Clone, Deserialize, Debug)]
 pub struct ChatCompletionsRequest {
@@ -23,6 +28,8 @@ pub struct ChatCompletionsRequest {
     pub tools: Option<Vec<Value>>,
     pub parallel_tool_calls: Option<bool>,
     pub tool_choice: Option<Value>,
+    #[serde(default)]
+    pub response_format: Option<Value>,
 }
 
 #[derive(Clone, Deserialize, Debug)]
@@ -101,6 +108,8 @@ struct ResponsesApiRequest {
     max_output_tokens: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<Value>,
     store: bool,
     stream: bool,
     include: Vec<String>,
@@ -168,30 +177,85 @@ enum ContentItem {
     OutputText { text: String },
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 struct AuthData {
+    /// Optional human-readable label for this account (e.g. "work")
+    #[serde(default)]
+    label: Option<String>,
     #[serde(rename = "OPENAI_API_KEY")]
     env_api_key: Option<String>,
     api_key: Option<String>,
     access_token: Option<String>,
+    refresh_token: Option<String>,
     account_id: Option<String>,
+    /// Unix timestamp of when the access_token expires.
+    expires_at: Option<i64>,
+    /// Legacy nested token format from Codex Desktop.
     tokens: Option<TokenData>,
+}
+
+impl AuthData {
+    /// Returns true if the access_token is missing or expires within `skew_secs` seconds.
+    fn is_expiring(&self, skew_secs: i64) -> bool {
+        let Some(exp) = self.expires_at else {
+            return false; // no expiry info — assume valid
+        };
+        let now = chrono::Utc::now().timestamp();
+        now >= exp - skew_secs
+    }
+
+    fn effective_access_token(&self) -> Option<&str> {
+        self.access_token
+            .as_deref()
+            .or_else(|| self.tokens.as_ref().map(|t| t.access_token.as_str()))
+    }
+
+    fn effective_account_id(&self) -> Option<&str> {
+        self.account_id
+            .as_deref()
+            .or_else(|| self.tokens.as_ref().map(|t| t.account_id.as_str()))
+    }
 }
 
 #[cfg(test)]
 impl AuthData {
     fn empty() -> Self {
         Self {
+            label: None,
             env_api_key: None,
             api_key: None,
             access_token: None,
+            refresh_token: None,
             account_id: None,
+            expires_at: None,
             tokens: None,
         }
     }
 }
 
-#[derive(Deserialize, Debug, Clone)]
+/// The new multi-account auth.json format.
+///
+/// ```json
+/// {
+///   "current": 0,
+///   "accounts": [
+///     { "label": "akun-1", "access_token": "...", "account_id": "..." },
+///     { "label": "akun-2", "access_token": "...", "account_id": "..." }
+///   ]
+/// }
+/// ```
+///
+/// For backward compatibility, a file that contains a single `AuthData` object
+/// (the legacy format) is also accepted and treated as a single-account config.
+#[derive(Deserialize, Serialize, Debug)]
+struct MultiAuthFile {
+    /// Index of the currently active account.
+    #[serde(default)]
+    current: usize,
+    accounts: Vec<AuthData>,
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone)]
 struct TokenData {
     access_token: String,
     account_id: String,
@@ -212,7 +276,12 @@ struct ResponsesApiEvent {
 #[derive(Clone)]
 pub struct ProxyServer {
     client: Client,
-    auth_data: AuthData,
+    /// All configured accounts (RwLock so refresh can update access_token in place).
+    accounts: Arc<RwLock<Vec<AuthData>>>,
+    /// Index of the currently active account (round-robins on 429).
+    current: Arc<AtomicUsize>,
+    /// Path to auth.json so we can persist `current` and refreshed tokens.
+    auth_path: Arc<String>,
     #[cfg(test)]
     test_stub_message: Option<String>,
     #[cfg(test)]
@@ -317,8 +386,27 @@ impl ProxyServer {
             .await
             .context("Failed to read auth.json")?;
 
-        let auth_data: AuthData =
-            serde_json::from_str(&auth_content).context("Failed to parse auth.json")?;
+        // Accept both the new multi-account format and the legacy single-account format.
+        let (accounts, current_index) =
+            if let Ok(multi) = serde_json::from_str::<MultiAuthFile>(&auth_content) {
+                let idx = multi.current.min(multi.accounts.len().saturating_sub(1));
+                (multi.accounts, idx)
+            } else {
+                // Legacy single-account format
+                let single: AuthData = serde_json::from_str(&auth_content)
+                    .context("Failed to parse auth.json")?;
+                (vec![single], 0)
+            };
+
+        if accounts.is_empty() {
+            anyhow::bail!("auth.json contains no accounts");
+        }
+
+        let label = accounts[current_index]
+            .label
+            .as_deref()
+            .unwrap_or("(unlabeled)");
+        debug!("event=auth.loaded accounts={} active={current_index} label={label}", accounts.len());
 
         // Use the same User-Agent format as the Codex Desktop app so that the
         // OpenAI backend applies the desktop quota tier:
@@ -334,12 +422,171 @@ impl ProxyServer {
 
         Ok(Self {
             client,
-            auth_data,
+            accounts: Arc::new(RwLock::new(accounts)),
+            current: Arc::new(AtomicUsize::new(current_index)),
+            auth_path: Arc::new(auth_path.to_string()),
             #[cfg(test)]
             test_stub_message: None,
             #[cfg(test)]
             test_stub_response: None,
         })
+    }
+
+    /// Returns a snapshot of the currently active `AuthData`.
+    fn current_auth(&self) -> AuthData {
+        let idx = self.current.load(Ordering::Relaxed);
+        self.accounts.read().expect("accounts lock poisoned")[idx].clone()
+    }
+
+    /// Refresh the access_token for account at `idx` using its refresh_token.
+    /// Saves the new token into memory and persists to auth.json.
+    async fn ensure_fresh_token(&self, idx: usize) {
+        const REFRESH_SKEW_SECS: i64 = 90;
+        const OAUTH_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
+        const OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+
+        // Check if refresh is needed (read lock only)
+        let (needs_refresh, refresh_token) = {
+            let accounts = self.accounts.read().expect("accounts lock poisoned");
+            let auth = &accounts[idx];
+            (
+                auth.is_expiring(REFRESH_SKEW_SECS),
+                auth.refresh_token.clone(),
+            )
+        };
+
+        if !needs_refresh {
+            return;
+        }
+
+        let Some(refresh_token) = refresh_token else {
+            let label = {
+                let accounts = self.accounts.read().expect("accounts lock poisoned");
+                accounts[idx].label.clone().unwrap_or_else(|| format!("#{idx}"))
+            };
+            warn!("event=auth.refresh_skipped reason=no_refresh_token label={label}");
+            return;
+        };
+
+        info!("event=auth.refresh_start idx={idx}");
+
+        let form = [
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh_token.as_str()),
+            ("client_id", OAUTH_CLIENT_ID),
+        ];
+
+        match self.client.post(OAUTH_TOKEN_URL).form(&form).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                #[derive(serde::Deserialize)]
+                struct TokenResp {
+                    access_token: String,
+                    #[serde(default)]
+                    refresh_token: Option<String>,
+                    #[serde(default)]
+                    expires_in: Option<i64>,
+                }
+
+                match resp.json::<TokenResp>().await {
+                    Ok(tokens) => {
+                        let new_exp = tokens
+                            .expires_in
+                            .map(|s| chrono::Utc::now().timestamp() + s);
+
+                        // Update in-memory
+                        {
+                            let mut accounts =
+                                self.accounts.write().expect("accounts lock poisoned");
+                            let auth = &mut accounts[idx];
+                            auth.access_token = Some(tokens.access_token);
+                            if let Some(rt) = tokens.refresh_token {
+                                auth.refresh_token = Some(rt);
+                            }
+                            auth.expires_at = new_exp;
+                        }
+
+                        info!("event=auth.refresh_ok idx={idx}");
+                        self.persist_accounts().await;
+                    }
+                    Err(e) => warn!("event=auth.refresh_parse_failed idx={idx} error={e}"),
+                }
+            }
+            Ok(resp) => {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                warn!("event=auth.refresh_failed idx={idx} status={status} body={body}");
+            }
+            Err(e) => warn!("event=auth.refresh_network_failed idx={idx} error={e}"),
+        }
+    }
+
+    /// Rotates to the next account (round-robin) and persists `current` to
+    /// `auth.json` so restarts pick up where we left off.
+    async fn rotate_account(&self) {
+        let n = self.accounts.read().expect("accounts lock poisoned").len();
+        if n <= 1 {
+            warn!("event=auth.rotate_skipped reason=only_one_account");
+            return;
+        }
+        let prev = self.current.load(Ordering::Relaxed);
+        let next = (prev + 1) % n;
+        self.current.store(next, Ordering::Relaxed);
+
+        let next_label = {
+            let accounts = self.accounts.read().expect("accounts lock poisoned");
+            accounts[next].label.clone().unwrap_or_else(|| "(unlabeled)".to_string())
+        };
+        warn!("event=auth.rotated prev={prev} next={next} label={next_label}");
+
+        // Persist `current` back to auth.json.
+        self.persist_current(next).await;
+    }
+
+    async fn persist_current(&self, current: usize) {
+        let path = self.auth_path.as_str();
+        match tokio::fs::read_to_string(path).await {
+            Ok(content) => {
+                if let Ok(mut multi) = serde_json::from_str::<MultiAuthFile>(&content) {
+                    multi.current = current;
+                    match serde_json::to_string_pretty(&multi) {
+                        Ok(updated) => {
+                            if let Err(e) = tokio::fs::write(path, updated).await {
+                                warn!("event=auth.persist_failed error={e}");
+                            }
+                        }
+                        Err(e) => warn!("event=auth.persist_serialize_failed error={e}"),
+                    }
+                }
+            }
+            Err(e) => warn!("event=auth.persist_read_failed error={e}"),
+        }
+    }
+
+    /// Persist the full accounts array (including refreshed tokens) to auth.json.
+    async fn persist_accounts(&self) {
+        let path = self.auth_path.as_str();
+        let accounts_snapshot = {
+            self.accounts.read().expect("accounts lock poisoned").clone()
+        };
+        let current = self.current.load(Ordering::Relaxed);
+
+        match tokio::fs::read_to_string(path).await {
+            Ok(content) => {
+                if let Ok(mut multi) = serde_json::from_str::<MultiAuthFile>(&content) {
+                    multi.current = current;
+                    multi.accounts = accounts_snapshot;
+                    match serde_json::to_string_pretty(&multi) {
+                        Ok(updated) => {
+                            if let Err(e) = tokio::fs::write(path, updated).await {
+                                warn!("event=auth.persist_accounts_failed error={e}");
+                            }
+                        }
+                        Err(e) => warn!("event=auth.persist_accounts_serialize_failed error={e}"),
+                    }
+                }
+            }
+            Err(e) => warn!("event=auth.persist_accounts_read_failed error={e}"),
+        }
     }
 
     #[cfg(test)]
@@ -350,7 +597,9 @@ impl ProxyServer {
 
         Self {
             client,
-            auth_data: AuthData::empty(),
+            accounts: Arc::new(RwLock::new(vec![AuthData::empty()])),
+            current: Arc::new(AtomicUsize::new(0)),
+            auth_path: Arc::new(String::new()),
             test_stub_message: None,
             test_stub_response: None,
         }
@@ -385,6 +634,7 @@ impl ProxyServer {
             tools,
             parallel_tool_calls,
             tool_choice,
+            response_format,
         } = chat_req;
         let mut input = Vec::new();
         let mut system_instructions = Vec::new();
@@ -440,12 +690,17 @@ impl ProxyServer {
             });
         }
 
-        let instructions = if system_instructions.is_empty() {
+        let mut instructions = if system_instructions.is_empty() {
             "You are a helpful AI assistant. Provide clear, accurate, and concise responses to user questions and requests."
                 .to_string()
         } else {
             system_instructions.join("\n\n")
         };
+
+        if let Some(response_format_instruction) = response_format_instruction(response_format.as_ref()) {
+            instructions.push_str("\n\n");
+            instructions.push_str(response_format_instruction);
+        }
 
         ResponsesApiRequest {
             model,
@@ -456,7 +711,14 @@ impl ProxyServer {
             parallel_tool_calls: parallel_tool_calls.unwrap_or(false),
             temperature,
             max_output_tokens: max_tokens,
-            reasoning: thinking_level.map(|level| json!({ "effort": level.backend_effort() })),
+            reasoning: Some(json!({
+                "effort": thinking_level.map(|l| l.backend_effort()).unwrap_or("xhigh"),
+                "summary": "auto"
+            })),
+            text: Some(json!({
+                "verbosity": "medium",
+                "format": response_format
+            })),
             store: false,
             // The Codex backend currently requires SSE responses even when the caller wants a
             // non-streaming Chat Completions response. The proxy consumes the SSE stream and
@@ -474,8 +736,7 @@ impl ProxyServer {
     ) -> ProxyResult<ChatCompletionsResponse> {
         debug!(
             "event=backend.request model={} stream={:?}",
-            chat_req.model,
-            chat_req.stream
+            chat_req.model, chat_req.stream
         );
 
         if execution.prefer_real_backend {
@@ -584,8 +845,7 @@ impl ProxyServer {
     ) -> ProxyResult<StreamingResponse> {
         debug!(
             "event=backend.streaming_request model={} stream={:?}",
-            chat_req.model,
-            chat_req.stream
+            chat_req.model, chat_req.stream
         );
 
         let include_usage = chat_req
@@ -729,16 +989,23 @@ impl ProxyServer {
         mut responses_req: ResponsesApiRequest,
     ) -> ProxyResult<(reqwest::Response, ResponsesApiRequest)> {
         let mut retried_without_max_output_tokens = false;
+        let mut retried_without_temperature = false;
+        // Only rotate accounts once per request (avoid infinite loops).
+        let mut rotated_account = false;
 
         loop {
+            let current_idx = self.current.load(Ordering::Relaxed);
+            // Refresh the token proactively if it is expiring soon.
+            self.ensure_fresh_token(current_idx).await;
+
+            let auth = self.current_auth();
             debug!(
-                "event=backend.call model={} max_output_tokens={:?}",
-                responses_req.model,
-                responses_req.max_output_tokens
+                "event=backend.call model={} max_output_tokens={:?} account={}",
+                responses_req.model, responses_req.max_output_tokens, current_idx
             );
 
             let response = self
-                .build_backend_request(&responses_req)
+                .build_backend_request_with_auth(&responses_req, &auth)
                 .json(&responses_req)
                 .send()
                 .await
@@ -751,8 +1018,34 @@ impl ProxyServer {
             }
 
             let status = response.status();
+
+            // On 429 (rate limited), rotate to the next account and retry once.
+            if status == reqwest::StatusCode::TOO_MANY_REQUESTS && !rotated_account {
+                let body = response.text().await.unwrap_or_default();
+                warn!(
+                    "event=backend.rate_limited account={current_idx} body_preview={}",
+                    body.chars().take(120).collect::<String>()
+                );
+                self.rotate_account().await;
+                rotated_account = true;
+                // Reset parameter-retry flags so the new account gets a clean attempt.
+                retried_without_temperature = false;
+                retried_without_max_output_tokens = false;
+                continue;
+            }
+
             let body = response.text().await.unwrap_or_default();
             let error = ProxyError::from_backend(status, &body);
+
+            if !retried_without_temperature
+                && responses_req.temperature.is_some()
+                && should_retry_without_temperature(&error)
+            {
+                warn!("event=backend.retry_without_temperature");
+                responses_req.temperature = None;
+                retried_without_temperature = true;
+                continue;
+            }
 
             if !retried_without_max_output_tokens
                 && responses_req.max_output_tokens.is_some()
@@ -768,9 +1061,10 @@ impl ProxyServer {
         }
     }
 
-    fn build_backend_request(
+    fn build_backend_request_with_auth(
         &self,
         responses_req: &ResponsesApiRequest,
+        auth: &AuthData,
     ) -> reqwest::RequestBuilder {
         let mut request_builder = self
             .client
@@ -788,27 +1082,14 @@ impl ProxyServer {
             .header("Pragma", "no-cache")
             .header("DNT", "1")
             .header("OpenAI-Beta", "responses=experimental")
-            // "Codex Desktop" is the originator value the desktop app sends;
-            // OpenAI's backend uses this to grant the desktop quota tier (2x CLI).
             .header("originator", "Codex Desktop");
 
-        if let Some(tokens) = &self.auth_data.tokens {
-            request_builder =
-                request_builder.header("Authorization", format!("Bearer {}", tokens.access_token));
-            request_builder =
-                request_builder.header("chatgpt-account-id", tokens.account_id.as_str());
-        } else if let (Some(access_token), Some(account_id)) =
-            (&self.auth_data.access_token, &self.auth_data.account_id)
-        {
-            request_builder =
-                request_builder.header("Authorization", format!("Bearer {access_token}"));
-            request_builder = request_builder.header("chatgpt-account-id", account_id.as_str());
-        } else if let Some(api_key) = self
-            .auth_data
-            .api_key
-            .as_ref()
-            .or(self.auth_data.env_api_key.as_ref())
-        {
+        if let Some(token) = auth.effective_access_token() {
+            request_builder = request_builder.header("Authorization", format!("Bearer {token}"));
+            if let Some(acct_id) = auth.effective_account_id() {
+                request_builder = request_builder.header("chatgpt-account-id", acct_id);
+            }
+        } else if let Some(api_key) = auth.api_key.as_ref().or(auth.env_api_key.as_ref()) {
             request_builder = request_builder.header("Authorization", format!("Bearer {api_key}"));
         }
 
@@ -1242,10 +1523,7 @@ fn normalize_tools(tools: &[Value]) -> Vec<Value> {
                 normalized.insert("description".to_string(), description.clone());
             }
             if let Some(parameters) = function.get("parameters") {
-                normalized.insert(
-                    "parameters".to_string(),
-                    normalize_json_schema(parameters),
-                );
+                normalized.insert("parameters".to_string(), normalize_json_schema(parameters));
             }
             if let Some(strict) = function.get("strict") {
                 normalized.insert("strict".to_string(), strict.clone());
@@ -1527,6 +1805,24 @@ fn default_error_code(status: reqwest::StatusCode) -> &'static str {
     }
 }
 
+fn should_retry_without_temperature(error: &ProxyError) -> bool {
+    error.status_code() == 400
+        && error
+            .message()
+            .contains("Unsupported parameter: temperature")
+}
+
+fn response_format_instruction(response_format: Option<&Value>) -> Option<&'static str> {
+    let response_format = response_format?;
+    let response_type = response_format.get("type").and_then(Value::as_str)?;
+
+    match response_type {
+        "json_object" => Some("Respond in json only."),
+        "json_schema" => Some("Respond in json and follow the provided schema."),
+        _ => None,
+    }
+}
+
 fn should_retry_without_max_output_tokens(error: &ProxyError) -> bool {
     error.status_code() == 400
         && error
@@ -1549,10 +1845,10 @@ mod tests {
     use serde_json::json;
 
     use super::{
+        BackendSseTranslator, ChatCompletionsRequest, ChatFunctionCall, ChatMessage,
+        ChatStreamOptions, ChatToolCall, ProxyError, ProxyServer, ResponsesApiResponse,
         collect_json_response_content, collect_response_content, default_error_code,
-        default_error_type, should_retry_without_max_output_tokens, BackendSseTranslator,
-        ChatCompletionsRequest, ChatFunctionCall, ChatMessage, ChatStreamOptions, ChatToolCall,
-        ProxyError, ProxyServer, ResponsesApiResponse,
+        default_error_type, should_retry_without_max_output_tokens,
     };
 
     #[test]
@@ -1575,6 +1871,7 @@ mod tests {
             tools: Some(vec![json!({"type":"function","function":{"name":"do_it"}})]),
             parallel_tool_calls: Some(true),
             tool_choice: Some(json!({"type":"function","function":{"name":"do_it"}})),
+            response_format: Some(json!({"type":"json_object"})),
         };
 
         let responses_request = server.convert_chat_to_responses(request, None);
@@ -1590,6 +1887,8 @@ mod tests {
         assert_eq!(payload["tool_choice"]["name"], "do_it");
         assert_eq!(payload["tools"][0]["name"], "do_it");
         assert_eq!(payload["include"], json!([]));
+        assert_eq!(payload["text"], json!({"verbosity": "medium", "format": {"type": "json_object"}}));
+        assert_eq!(payload["reasoning"], json!({"effort": "xhigh", "summary": "auto"}));
     }
 
     #[test]
@@ -1616,6 +1915,7 @@ mod tests {
             })]),
             parallel_tool_calls: None,
             tool_choice: None,
+            response_format: None,
         };
 
         let responses_request = server.convert_chat_to_responses(request, None);
@@ -1643,6 +1943,7 @@ mod tests {
             tools: None,
             parallel_tool_calls: None,
             tool_choice: None,
+            response_format: None,
         };
 
         let responses_request = server.convert_chat_to_responses(
@@ -1699,6 +2000,7 @@ mod tests {
             tools: None,
             parallel_tool_calls: None,
             tool_choice: None,
+            response_format: None,
         };
 
         let responses_request = server.convert_chat_to_responses(request, None);
@@ -1742,6 +2044,7 @@ mod tests {
             tools: None,
             parallel_tool_calls: None,
             tool_choice: None,
+            response_format: None,
         };
 
         let responses_request = server.convert_chat_to_responses(request, None);
@@ -1779,6 +2082,7 @@ mod tests {
             tools: None,
             parallel_tool_calls: None,
             tool_choice: None,
+            response_format: None,
         };
 
         let responses_request = server.convert_chat_to_responses(request, None);
@@ -1829,6 +2133,7 @@ mod tests {
             tools: None,
             parallel_tool_calls: None,
             tool_choice: None,
+            response_format: None,
         };
 
         let responses_request = server.convert_chat_to_responses(request, None);

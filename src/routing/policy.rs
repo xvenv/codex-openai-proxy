@@ -3,7 +3,7 @@ use warp::http::HeaderMap;
 use crate::{backend::ChatCompletionsRequest, config::RoutingPolicyConfig, models::ModelRegistry};
 
 use super::{
-    analyzer::{analyze, RequestFeatures},
+    analyzer::{RequestFeatures, analyze},
     decision::{OverrideSource, RoutingDecision, RoutingReason, TaskKind, ThinkingLevel},
 };
 
@@ -277,7 +277,7 @@ mod tests {
         models::ModelRegistry,
     };
 
-    use super::{decide, RoutingReason, ThinkingLevel};
+    use super::{RoutingReason, ThinkingLevel, decide};
 
     #[test]
     fn routes_simple_chat_to_small() {
@@ -296,6 +296,7 @@ mod tests {
             tools: None,
             parallel_tool_calls: None,
             tool_choice: None,
+            response_format: None,
         };
 
         let decision = decide(
@@ -327,6 +328,7 @@ mod tests {
             tools: None,
             parallel_tool_calls: None,
             tool_choice: None,
+            response_format: None,
         };
 
         let decision = decide(
@@ -339,9 +341,11 @@ mod tests {
         assert_eq!(decision.selected_alias, "medium");
         assert_eq!(decision.backend_model, "gpt-5.3-codex");
         assert_eq!(decision.thinking_level, ThinkingLevel::Medium);
-        assert!(decision
-            .reason_codes
-            .contains(&RoutingReason::MediumTaskKind));
+        assert!(
+            decision
+                .reason_codes
+                .contains(&RoutingReason::MediumTaskKind)
+        );
     }
 
     #[test]
@@ -361,6 +365,7 @@ mod tests {
             tools: None,
             parallel_tool_calls: None,
             tool_choice: None,
+            response_format: None,
         };
 
         let decision = decide(
@@ -373,9 +378,11 @@ mod tests {
         assert_eq!(decision.selected_alias, "large");
         assert_eq!(decision.backend_model, "gpt-5.4");
         assert_eq!(decision.thinking_level, ThinkingLevel::High);
-        assert!(decision
-            .reason_codes
-            .contains(&RoutingReason::ComplexTaskKind));
+        assert!(
+            decision
+                .reason_codes
+                .contains(&RoutingReason::ComplexTaskKind)
+        );
     }
 
     #[test]
@@ -395,6 +402,7 @@ mod tests {
             tools: None,
             parallel_tool_calls: None,
             tool_choice: None,
+            response_format: None,
         };
         let config = RoutingPolicyConfig {
             large_min_chars: 10,
@@ -428,6 +436,7 @@ mod tests {
             tools: None,
             parallel_tool_calls: None,
             tool_choice: None,
+            response_format: None,
         };
         let mut headers = HeaderMap::new();
         headers.insert("x-codex-thinking", HeaderValue::from_static("high"));
@@ -459,6 +468,7 @@ mod tests {
             tools: None,
             parallel_tool_calls: None,
             tool_choice: None,
+            response_format: None,
         };
         let mut headers = HeaderMap::new();
         headers.insert("x-codex-thinking", HeaderValue::from_static("extra_high"));
@@ -490,6 +500,7 @@ mod tests {
             tools: None,
             parallel_tool_calls: None,
             tool_choice: None,
+            response_format: None,
         };
         let mut headers = HeaderMap::new();
         headers.insert("x-codex-routing-mode", HeaderValue::from_static("quality"));
@@ -502,8 +513,10 @@ mod tests {
         );
 
         assert_eq!(decision.selected_alias, "large");
-        assert!(decision
-            .reason_codes
-            .contains(&RoutingReason::RoutingModeQuality));
+        assert!(
+            decision
+                .reason_codes
+                .contains(&RoutingReason::RoutingModeQuality)
+        );
     }
 }

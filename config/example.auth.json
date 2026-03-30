@@ -1,0 +1,16 @@
+{
+  "_comment": "Multi-account auth file. 'current' is the index of the active account. On 429 rate limit, the proxy auto-rotates and updates this field.",
+  "current": 0,
+  "accounts": [
+    {
+      "label": "akun-1",
+      "access_token": "your-access-token-1",
+      "account_id": "your-account-id-1"
+    },
+    {
+      "label": "akun-2",
+      "access_token": "your-access-token-2",
+      "account_id": "your-account-id-2"
+    }
+  ]
+}

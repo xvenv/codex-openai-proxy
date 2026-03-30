@@ -1,17 +1,17 @@
 use bytes::Bytes;
-use futures_util::{stream, StreamExt};
+use futures_util::{StreamExt, stream};
 use log::{error, info, warn};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::convert::Infallible;
 use warp::{
+    Reply,
     http::{HeaderMap, HeaderValue, Method, StatusCode},
     hyper::Body,
     path::FullPath,
     reject::Rejection,
     reply::{self, Response},
-    Reply,
 };
 
 use crate::{
@@ -388,6 +388,8 @@ struct AnthropicMessagesRequest {
     stop_sequences: Option<Vec<String>>,
     #[serde(default)]
     service_tier: Option<String>,
+    #[serde(default)]
+    response_format: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -880,6 +882,7 @@ fn anthropic_to_chat_request(
             .map(|tools| convert_anthropic_tools(tools.as_slice())),
         parallel_tool_calls: Some(true),
         tool_choice: normalize_anthropic_tool_choice(request.tool_choice.as_ref()),
+        response_format: request.response_format.clone(),
     })
 }
 
@@ -1244,7 +1247,7 @@ fn thinking_level_rank(level: &routing::decision::ThinkingLevel) -> u8 {
 
 #[cfg(test)]
 mod tests {
-    use super::{anthropic_to_chat_request, AnthropicMessagesRequest};
+    use super::{AnthropicMessagesRequest, anthropic_to_chat_request};
     use std::collections::HashMap;
 
     #[test]
@@ -1254,7 +1257,8 @@ mod tests {
                 "model": "claude-3-7-sonnet-20250219",
                 "messages": [{"role": "user", "content": "hello"}],
                 "max_tokens": 128,
-                "temperature": 0.7
+                "temperature": 0.7,
+                "response_format": {"type": "json_schema", "json_schema": {"name": "structured", "schema": {"type": "object"}}}
             }"#,
         )
         .expect("Anthropic request should deserialize");
@@ -1263,6 +1267,10 @@ mod tests {
             .expect("Anthropic request should convert");
 
         assert_eq!(chat_request.temperature, None);
+        assert_eq!(
+            chat_request.response_format,
+            Some(serde_json::json!({"type":"json_schema","json_schema":{"name":"structured","schema":{"type":"object"}}}))
+        );
     }
 }
 

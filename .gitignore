@@ -39,6 +39,9 @@ auth.json
 *.pem
 *.key
 
+# References (local context)
+references/
+
 # Temporary files
 /tmp/
 *.tmp
